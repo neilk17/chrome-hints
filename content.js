@@ -5,17 +5,25 @@ class HintManager {
     this.isActive = false;
     this.partialMatch = '';
     this.shiftPressed = false;
+    this.cachedClickableElements = null;
+    this.lastCacheTime = 0;
+    this.cacheExpiryTime = 5000; // ms - how long the cache is valid
+    this.clickMode = 'normal'; // 'normal', 'newTab', 'newTabSwitch'
     
     // Bind methods
     this.activateHints = this.activateHints.bind(this);
     this.removeHints = this.removeHints.bind(this);
     this.handleKeyDown = this.handleKeyDown.bind(this);
     this.handleKeyUp = this.handleKeyUp.bind(this);
+    this.precomputeHints = this.precomputeHints.bind(this);
     
     // Set up message listener
     chrome.runtime.onMessage.addListener((message) => {
       if (message.action === 'activateHints') {
+        this.clickMode = message.mode || 'normal';
         this.activateHints();
+      } else if (message.action === 'precomputeHints') {
+        this.precomputeHints();
       }
     });
   }
@@ -118,6 +126,14 @@ class HintManager {
     this.activeHints = [...this.hints];
   }
   
+  // Precompute clickable elements when the browser is idle
+  precomputeHints() {
+    // Cache the clickable elements for faster activation later
+    this.cachedClickableElements = this.findClickableElements();
+    this.lastCacheTime = Date.now();
+    console.debug(`Precomputed ${this.cachedClickableElements.length} clickable elements during idle time`);
+  }
+  
   // Activate hint mode
   activateHints() {
     if (this.isActive) {
@@ -130,7 +146,21 @@ class HintManager {
     this.activeHints = [];
     this.partialMatch = '';
     
-    const elements = this.findClickableElements();
+    // Set data attribute on body to enable CSS styling based on mode
+    document.body.setAttribute('data-click-mode', this.clickMode);
+    
+    let elements;
+    
+    // Use cached elements if available and not expired
+    const now = Date.now();
+    if (this.cachedClickableElements && (now - this.lastCacheTime < this.cacheExpiryTime)) {
+      elements = this.cachedClickableElements;
+      console.debug(`Using ${elements.length} pre-computed clickable elements (${now - this.lastCacheTime}ms old)`);
+    } else {
+      elements = this.findClickableElements();
+      console.debug(`Found ${elements.length} clickable elements (cache expired or not available)`);
+    }
+    
     this.createHints(elements);
     
     // Add keyboard listeners
@@ -151,9 +181,18 @@ class HintManager {
     this.isActive = false;
     this.partialMatch = '';
     
+    // Remove data attribute from body
+    document.body.removeAttribute('data-click-mode');
+    
     // Remove keyboard listeners
     document.removeEventListener('keydown', this.handleKeyDown);
     document.removeEventListener('keyup', this.handleKeyUp);
+    
+    // After hints are removed, we can precompute for next time
+    // This ensures the cache is fresh even if the idle event hasn't fired
+    setTimeout(() => {
+      this.precomputeHints();
+    }, 500); // Small delay to ensure page is settled
   }
   
   // Handle key down events
@@ -251,8 +290,30 @@ class HintManager {
     if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA' || 
         element.contentEditable === 'true') {
       element.focus();
+    } else if (element.tagName === 'A' && (this.clickMode === 'newTab' || this.clickMode === 'newTabSwitch')) {
+      // For links with new tab modes
+      const href = element.getAttribute('href');
+      if (href) {
+        console.log(`Clicking link with mode: ${this.clickMode}`, href);
+        
+        // Create a click event with modifier keys based on the mode
+        const clickEvent = new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          ctrlKey: true,  // Ctrl+click opens in new tab
+          shiftKey: this.clickMode === 'newTabSwitch',  // Shift+click in most browsers opens and switches
+          metaKey: navigator.platform.includes('Mac')  // For Mac users
+        });
+        
+        // Apply the click with modifiers
+        element.dispatchEvent(clickEvent);
+      } else {
+        // Fallback if href is not available
+        element.click();
+      }
     } else {
-      // For links and buttons, simulate a click
+      // For regular links and buttons, simulate normal click
       element.click();
     }
   }
@@ -260,3 +321,39 @@ class HintManager {
 
 // Initialize the hint manager
 const hintManager = new HintManager();
+
+// Set up event listeners for DOM changes that might affect clickable elements
+const observer = new MutationObserver(() => {
+  // If the hints are not currently active, precompute for next time
+  if (!hintManager.isActive) {
+    // Clear any existing timeout to avoid multiple precomputes in quick succession
+    if (hintManager.precomputeTimeout) {
+      clearTimeout(hintManager.precomputeTimeout);
+    }
+    
+    // Delay precompute to batch DOM changes
+    hintManager.precomputeTimeout = setTimeout(() => {
+      hintManager.precomputeHints();
+      hintManager.precomputeTimeout = null;
+    }, 1000);
+  }
+});
+
+// Start observing DOM changes
+observer.observe(document.body, {
+  childList: true,
+  subtree: true,
+  attributes: true,
+  attributeFilter: ['style', 'class', 'hidden']
+});
+
+// Precompute hints when page loads or becomes visible
+document.addEventListener('DOMContentLoaded', () => {
+  hintManager.precomputeHints();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    hintManager.precomputeHints();
+  }
+});

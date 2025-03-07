@@ -16,3 +16,15 @@
   background-color: #ff9900;
   border-color: #cc7700;
 }
+
+/* Special styling for newTab mode */
+body[data-click-mode="newTab"] .hint-marker {
+  background-color: #ccffcc;
+  border-color: #88cc88;
+}
+
+/* Special styling for newTabSwitch mode */
+body[data-click-mode="newTabSwitch"] .hint-marker {
+  background-color: #ccccff;
+  border-color: #8888cc;
+}
